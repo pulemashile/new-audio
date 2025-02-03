@@ -1,78 +1,70 @@
 import React, { useState, useEffect } from 'react';
-import { View, StyleSheet, Text, FlatList, Alert, TextInput, Pressable, Button } from 'react-native';
+import { View, StyleSheet, Button, Text, FlatList, Alert, TextInput } from 'react-native';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
-import * as SecureStore from 'expo-secure-store';
+import * as MailComposer from 'expo-mail-composer';
 import * as Sharing from 'expo-sharing';
-import Icon from 'react-native-vector-icons/FontAwesome'; // Importing FontAwesome icons
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import Slider from '@react-native-community/slider';
 
 export default function App() {
   const [hasPermission, setHasPermission] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
   const [recording, setRecording] = useState(null);
-  const [voiceNotes, setVoiceNotes] = useState([]);
-  const [sound, setSound] = useState(null);
+  const [voiceNotes, setVoiceNotes] = useState([]); // Store list of voice notes
+  const [sound, setSound] = useState(null); // Audio playback object
+  const [currentNoteLength, setCurrentNoteLength] = useState(0); // Current note length
+  const [playbackPosition, setPlaybackPosition] = useState(0); // Current playback position
   const [recordingTime, setRecordingTime] = useState(0);
-  const [recordingURI, setRecordingURI] = useState(null);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [theme, setTheme] = useState('dark');
+  const [searchQuery, setSearchQuery] = useState("");
 
   useEffect(() => {
+    // Request microphone permission on app load (using Audio API)
     const requestPermissions = async () => {
       const { status } = await Audio.requestPermissionsAsync();
       setHasPermission(status === 'granted');
       if (status !== 'granted') {
-        Alert.alert('Permission Denied', 'You need to grant permission to access the microphone');
+        Alert.alert("Permission Denied", "You need to grant permission to access the microphone");
       }
     };
     requestPermissions();
     loadVoiceNotes();
-    loadUserSettings();
   }, []);
 
+  // Load saved voice notes from AsyncStorage
   const loadVoiceNotes = async () => {
     try {
-      const files = await FileSystem.readDirectoryAsync(FileSystem.documentDirectory + 'voice_notes');
-      const notes = files.map(file => ({
-        name: file,
-        uri: FileSystem.documentDirectory + 'voice_notes/' + file,
-        date: new Date(),
-      }));
-      setVoiceNotes(notes);
-    } catch (e) {
-      console.error('Error loading voice notes', e);
-    }
-  };
-
-  const loadUserSettings = async () => {
-    try {
-      const savedTheme = await SecureStore.getItemAsync('theme');
-      if (savedTheme) {
-        setTheme(savedTheme);
+      const notes = await AsyncStorage.getItem('voiceNotes');
+      if (notes) {
+        setVoiceNotes(JSON.parse(notes));
       }
-    } catch (error) {
-      console.error('Error loading user settings:', error);
+    } catch (e) {
+      console.error("Error loading voice notes", e);
     }
   };
 
-  const saveUserSettings = async (newTheme) => {
+  // Save voice notes to AsyncStorage
+  const saveVoiceNotes = async (notes) => {
     try {
-      await SecureStore.setItemAsync('theme', newTheme);
-      setTheme(newTheme);
-    } catch (error) {
-      console.error('Error saving theme setting:', error);
+      await AsyncStorage.setItem('voiceNotes', JSON.stringify(notes));
+    } catch (e) {
+      console.error("Error saving voice notes", e);
     }
   };
 
+  // Start recording
   const startRecording = async () => {
     try {
       if (hasPermission) {
-        const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+        const { recording } = await Audio.Recording.createAsync(
+          Audio.RecordingOptionsPresets.HIGH_QUALITY
+        );
         setRecording(recording);
         setIsRecording(true);
         setRecordingTime(0);
         await recording.startAsync();
 
+        // Update the recording time every second
         const interval = setInterval(() => {
           setRecordingTime(prevTime => prevTime + 1);
         }, 1000);
@@ -85,14 +77,20 @@ export default function App() {
     }
   };
 
+  // Stop recording
   const stopRecording = async () => {
     try {
       if (recording) {
         await recording.stopAndUnloadAsync();
         const uri = recording.getURI();
-        setRecordingURI(uri);
+        const newNote = { name: `Note ${voiceNotes.length + 1}`, uri, date: new Date() };
+        const updatedNotes = [...voiceNotes, newNote];
+        setVoiceNotes(updatedNotes);
+        saveVoiceNotes(updatedNotes);
         setIsRecording(false);
         setRecording(null);
+
+        // Clear the recording interval
         clearInterval(recordingInterval);
       }
     } catch (err) {
@@ -100,138 +98,142 @@ export default function App() {
     }
   };
 
+  // Play the selected voice note
   const playSound = async (uri) => {
     try {
-      const { sound } = await Audio.Sound.createAsync({ uri });
+      const { sound, status } = await Audio.Sound.createAsync(
+        { uri },
+        { shouldPlay: true },
+        onPlaybackStatusUpdate
+      );
       setSound(sound);
-      await sound.playAsync();
+      setCurrentNoteLength(status.durationMillis / 1000); // Set the length in seconds
     } catch (err) {
       console.error('Error playing sound:', err);
     }
   };
 
+  // Update playback status
+  const onPlaybackStatusUpdate = (status) => {
+    if (status.isLoaded) {
+      setPlaybackPosition(status.positionMillis / 1000);
+    }
+  };
+
+  // Stop the playback
   const stopSound = async () => {
     try {
       if (sound) {
         await sound.stopAsync();
         setSound(null);
+        setPlaybackPosition(0); // Reset the playback position
+        setCurrentNoteLength(0); // Reset the length
       }
     } catch (err) {
       console.error('Error stopping playback:', err);
     }
   };
 
-  const shareRecording = async () => {
+  // Delete a voice note
+  const deleteVoiceNote = async (uri) => {
     try {
-      if (recordingURI && Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(recordingURI);
-      } else {
-        Alert.alert('Sharing Unavailable', 'Sharing is not available on this device.');
-      }
+      const updatedNotes = voiceNotes.filter(note => note.uri !== uri);
+      setVoiceNotes(updatedNotes);
+      saveVoiceNotes(updatedNotes);
+      await FileSystem.deleteAsync(uri);
     } catch (err) {
-      console.error('Error sharing recording:', err);
+      console.error('Error deleting voice note:', err);
     }
   };
 
-  const saveRecording = async () => {
+  // Function to handle feedback
+  const sendFeedback = async () => {
     try {
-      const fileName = `VoiceNote_${new Date().toISOString()}.m4a`;
-      const destUri = FileSystem.documentDirectory + 'voice_notes/' + fileName;
-      await FileSystem.copyAsync({
-        from: recordingURI,
-        to: destUri,
+      const isAvailable = await MailComposer.isAvailableAsync();
+      if (!isAvailable) {
+        Alert.alert('Mail Composer Unavailable', 'Mail Composer is not available on this device.');
+        return;
+      }
+      await MailComposer.composeAsync({
+        recipients: ['your-email@example.com'], // Replace with your email address
+        subject: 'App Feedback',
+        body: 'Please provide your feedback here...',
       });
-      setVoiceNotes(prevNotes => [...prevNotes, { name: fileName, uri: destUri, date: new Date() }]);
-      Alert.alert('Saved', 'Your recording has been saved.');
-    } catch (err) {
-      console.error('Error saving recording:', err);
+    } catch (error) {
+      console.error('Error sending feedback:', error);
+      Alert.alert('Error', 'An error occurred while sending feedback.');
     }
   };
 
-  const deleteRecording = async () => {
+  // Function to handle sharing
+  const shareVoiceNote = async (uri) => {
     try {
-      if (recordingURI) {
-        await FileSystem.deleteAsync(recordingURI);
-        Alert.alert('Deleted', 'Your recording has been deleted.');
-        setRecordingURI(null);
+      const fileInfo = await FileSystem.getInfoAsync(uri);
+      if (!fileInfo.exists) {
+        Alert.alert('File Not Found', 'The voice note file does not exist.');
+        return;
       }
-    } catch (err) {
-      console.error('Error deleting recording:', err);
+      await Sharing.shareAsync(uri);
+    } catch (error) {
+      console.error('Error sharing voice note:', error);
+      Alert.alert('Error', 'An error occurred while sharing the voice note.');
     }
   };
 
+  // Search functionality
   const filteredVoiceNotes = voiceNotes.filter(note => note.name.toLowerCase().includes(searchQuery.toLowerCase()));
-  const latestVoiceNote = voiceNotes.length > 0 ? voiceNotes[0] : null;
 
   return (
-    <View style={[styles.container, theme === 'dark' ? styles.darkTheme : styles.lightTheme]}>
-      {/* Display the name of the most recent recording */}
-      {latestVoiceNote ? (
-        <Text style={styles.noteName}>{latestVoiceNote.name}</Text>
-      ) : (
-        <Text className="text-white text-lg font-semibold py-3 px-6  shadow-md hover:shadow-lg transition duration-300 ease-in-out" style={styles.poppinsRegular}>No recordings available</Text>
-      )}
-
-      {/* Recording controls */}
-      <Pressable className="bg-[#6a8dff] text-white text-lg font-semibold py-3 px-6 rounded-sm shadow-md hover:shadow-lg transition duration-300 ease-in-out"
-        
+    <View style={styles.container}>
+      <Button styles={styles.button}
+        title={isRecording ? 'Stop Recording' : 'Start Recording'}
         onPress={isRecording ? stopRecording : startRecording}
         disabled={!hasPermission}
-        style={styles.poppinsRegular}>
-      Record
-        {/* <Icon name="microphone" size={20} color="white" /> */}
-        {/* <Text className="text-white text-lg font-semibold py-3 px-6 rounded-full shadow-md hover:shadow-lg transition duration-300 ease-in-out">{isRecording ? 'Stop Recording' : 'Start Recording'}</Text> */}
-      </Pressable>
-
-      {/* After recording, show options to play, save, delete, and share */}
-      {recordingURI && !isRecording && (
-        <View style={styles.actionContainer}>
-          <Pressable style={styles.playButton} onPress={() => playSound(recordingURI)}>
-            <Text className="text-white text-lg font-semibold py-3 px-6 rounded-full shadow-md hover:shadow-lg transition duration-300 ease-in-out">Play</Text>
-          </Pressable>
-
-          <Pressable style={styles.playButton} onPress={saveRecording}>
-            <Text className="text-white text-lg font-semibold py-3 px-6 rounded-full shadow-md hover:shadow-lg transition duration-300 ease-in-out">Save</Text>
-          </Pressable>
-
-          <Pressable style={styles.playButton} onPress={deleteRecording}>
-            <Text className="text-white text-lg font-semibold py-3 px-6 rounded-full shadow-md hover:shadow-lg transition duration-300 ease-in-out">❌ Delete</Text>
-          </Pressable>
-
-          <Pressable style={styles.playButton} onPress={shareRecording}>
-            <Text className="text-white text-lg font-semibold py-3 px-6 rounded-full shadow-md hover:shadow-lg transition duration-300 ease-in-out">Share</Text>
-          </Pressable>
-        </View>
-      )}
-
-      {/* Search input */}
+      />
+      {isRecording && <Text style={styles.timer}>Recording Time: {recordingTime}s</Text>}
+      
       <TextInput
-        className="w-full border border-gray-300 rounded-md px-4 py-2 mb-4"
+        style={styles.searchInput}
         placeholder="Search Voice Notes"
         value={searchQuery}
         onChangeText={setSearchQuery}
-        style={styles.poppinsRegular}
       />
-
-      {/* List of voice notes */}
+      
       <FlatList
         data={filteredVoiceNotes}
         keyExtractor={(item) => item.uri}
         renderItem={({ item }) => (
-          <View style className="w-full border border-gray-300 rounded-md px-4 py-2 mb-4" >
-            <Text className="text-lg font-semibold">{item.name}</Text>
-            <Text className="text-sm text-gray-500">{item.date.toString()}</Text>
-            <Pressable className="mt-4 bg-[#6a8dff] text-white text-lg font-semibold py-3 px-6 rounded-sm shadow-md hover:shadow-lg transition duration-300 ease-in-out" onPress={() => playSound(item.uri)}>
-              <Text className="text-white text-lg font-semibold py-3 px-6 rounded-full shadow-md hover:shadow-lg transition duration-300 ease-in-out">Play</Text>
-            </Pressable>
+          <View style={styles.noteItem}>
+            <Text style={styles.noteName}>{item.name}</Text>
+            <Text style={styles.noteDate}>{item.date.toString()}</Text>
+            <Button title="Play" onPress={() => playSound(item.uri)} />
+            <Button title="Stop" onPress={stopSound} />
+            <Button title="Share" onPress={() => shareVoiceNote(item.uri)} />
+            <Button title="Delete" onPress={() => deleteVoiceNote(item.uri)} />
           </View>
         )}
       />
-
-      {/* Theme toggle */}
-      <View className="mt-20">
-        <Pressable title="Toggle Theme" onPress={() => saveUserSettings(theme === 'dark' ? 'light' : 'dark')} />
-      </View>
+      <Button title="Send Feedback" onPress={sendFeedback} />
+      {sound && currentNoteLength > 0 && (
+        <View style={styles.sliderContainer}>
+          <Text style={styles.timer}>Note Length: {currentNoteLength}s</Text>
+          <Text style={styles.timer}>Current Position: {playbackPosition.toFixed(1)}s</Text>
+          <Slider
+            style={styles.slider}
+            minimumValue={0}
+            maximumValue={currentNoteLength}
+            value={playbackPosition}
+            minimumTrackTintColor="#FFFFFF"
+            maximumTrackTintColor="#000000"
+            thumbTintColor="#FFFFFF"
+            onSlidingComplete={async (value) => {
+              if (sound) {
+                await sound.setPositionAsync(value * 1000);
+              }
+            }}
+          />
+        </View>
+      )}
     </View>
   );
 }
@@ -241,14 +243,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'flex-start',
     padding: 10,
-  },
-  darkTheme: {
-    backgroundColor: '#222',
-    color: '#fff',
-  },
-  lightTheme: {
-    backgroundColor: '#fff',
-    color: '#000',
+    backgroundColor: 'black',
   },
   timer: {
     fontSize: 24,
@@ -271,55 +266,36 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     backgroundColor: '#B7B7B7',
   },
-  playButton: {
-    width: 120,
-    height: 40,
-    borderRadius: 5,
-    backgroundColor: '#B7B7B7',
-    justifyContent: 'center',
-    alignItems: 'center',
+  button: {
     marginBottom: 10,
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-  },
-  buttonText: {
-    color: 'white',
-    fontWeight: 'bold',
-    fontFamily: 'poppinsRegular',
+    backgroundColor: '#B7B7B7',
+    padding: 10,
+    borderRadius: 10,
+    width: 100,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   noteName: {
     fontSize: 18,
     fontWeight: 'bold',
     color: '#0A5EB0',
     marginBottom: 5,
+    flex: 1,
   },
   noteDate: {
     fontSize: 14,
     color: '#888',
     fontStyle: 'italic',
+    marginTop: 5,
+    textAlign: 'right',
   },
-  actionContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginVertical: 20,
-  },
-  footer: {
+  sliderContainer: {
     marginTop: 20,
+    width: '100%',
+    alignItems: 'center',
   },
-  poppinsRegular:{
-  fontFamily: 'poppinsRegular',
-},
-poppinsBold: {
-  fontFamily: 'poppinsBold',
-},
-poppinsMedium: {
-  fontFamily: 'poppinsMedium',
-},
-poppinsSemiBold: {
-  fontFamily: 'poppinsSemiBold',
-},
-poppinsExtraBold: {
-  fontFamily: 'poppinsExtraBold',
-},
+  slider: {
+    width: '90%',
+    height: 40,
+  },
 });
-
